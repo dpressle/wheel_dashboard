@@ -256,6 +256,25 @@ def compute_monthly_pnl(trades_stocks: pd.DataFrame, trades_options: pd.DataFram
     ])
 
 
+def compute_monthly_deposits(deposits: pd.DataFrame) -> pd.Series:
+    """Sum deposits/withdrawals by month, keyed by 'YYYY-MM' period string."""
+    if deposits.empty:
+        return pd.Series(dtype=float)
+    date_col = next((c for c in deposits.columns if 'date' in c.lower()), None)
+    amt_col = next((c for c in deposits.columns if 'amount' in c.lower()), None)
+    if not date_col or not amt_col:
+        return pd.Series(dtype=float)
+    df = deposits.copy()
+    df['_date'] = pd.to_datetime(df[date_col], errors='coerce')
+    df['_amount'] = pd.to_numeric(
+        df[amt_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    df = df.dropna(subset=['_date'])
+    if df.empty:
+        return pd.Series(dtype=float)
+    df['_month'] = df['_date'].dt.to_period('M').astype(str)
+    return df.groupby('_month')['_amount'].sum()
+
+
 def wheel_premium_by_symbol(trades_options: pd.DataFrame) -> pd.DataFrame:
     """Sum realized P&L from closed option trades grouped by underlying symbol."""
     if trades_options.empty:
@@ -740,12 +759,18 @@ def main():
             with col_tbl:
                 tbl = monthly_df.copy()
                 tbl['Running Total'] = tbl['Total'].cumsum().round(2)
-                tbl['ROI %'] = (tbl['Total'] / starting_value * 100).round(2) if starting_value else 0.0
+                monthly_deposits = compute_monthly_deposits(data['deposits']).reindex(tbl['Month'], fill_value=0.0)
+                cum_deposits_prior = monthly_deposits.cumsum().shift(1, fill_value=0.0).values
+                tbl['Month Start Value'] = (
+                    starting_value + tbl['Running Total'].shift(1, fill_value=0) + cum_deposits_prior
+                ).round(2)
+                tbl['ROI %'] = (tbl['Total'] / tbl['Month Start Value'] * 100).round(2) if starting_value else 0.0
                 tbl['Cum ROI %'] = (tbl['Running Total'] / starting_value * 100).round(2) if starting_value else 0.0
                 st.dataframe(
                     tbl.style.format({
                         'Options': '${:,.0f}', 'Stocks': '${:,.0f}',
                         'Total': '${:,.0f}', 'Running Total': '${:,.0f}',
+                        'Month Start Value': '${:,.0f}',
                         'ROI %': '{:+.2f}%', 'Cum ROI %': '{:+.2f}%',
                     }).map(pnl_color, subset=['Options','Stocks','Total','Running Total','ROI %','Cum ROI %']),
                     use_container_width=True, hide_index=True,
